@@ -1,0 +1,58 @@
+import os
+from qgis.PyQt.QtCore import QVariant
+
+# === CONFIGURACIÓN ===
+
+# Nombre de la capa cargada en QGIS
+nombre_capa = 'PROYECTO FINAL ARENA MEXICO_2 — PROYECTO FINAL ARENA MEXICO__ATTACH'  # 🔁 Cambia según el nombre exacto
+
+# Campo que contiene el BLOB de imagen
+campo_imagen = 'DATA'  # 🔁 Asegúrate del nombre correcto
+
+# Carpeta donde se guardarán las imágenes
+carpeta_salida = r'C:\Users\gis_d\OneDrive\Imágenes\Prueba'  # 🔁 Cambia a tu ruta
+
+# Crear carpeta si no existe
+if not os.path.exists(carpeta_salida):
+    os.makedirs(carpeta_salida)
+
+# === INICIO DEL PROCESO ===
+
+# Obtener la capa
+layer = QgsProject.instance().mapLayersByName(nombre_capa)[0]
+
+# Añadir nuevo campo si no existe
+campo_ruta = 'ruta_imagen'
+if campo_ruta not in [f.name() for f in layer.fields()]:
+    layer.startEditing()
+    layer.dataProvider().addAttributes([QgsField(campo_ruta, QVariant.String)])
+    layer.updateFields()
+    layer.commitChanges()
+
+# Comenzar edición
+layer.startEditing()
+
+# Índices de los campos
+idx_blob = layer.fields().indexFromName(campo_imagen)
+idx_ruta = layer.fields().indexFromName(campo_ruta)
+
+# Recorrer entidades
+for i, feature in enumerate(layer.getFeatures()):
+    blob_data = feature[idx_blob]
+
+    if blob_data:
+        fid = feature.id()
+        imagen_nombre = f"img_{fid}.jpg"
+        ruta_completa = os.path.join(carpeta_salida, imagen_nombre)
+
+        # Guardar la imagen
+        with open(ruta_completa, 'wb') as f:
+            f.write(blob_data)
+
+        # Actualizar atributo con la ruta
+        layer.changeAttributeValue(fid, idx_ruta, ruta_completa)
+
+# Guardar cambios
+layer.commitChanges()
+
+print("✅ Imágenes extraídas y rutas actualizadas en la tabla de atributos.")
