@@ -1,0 +1,6 @@
+from qgis.core import QgsProject
+
+capas = QgsProject.instance().mapLayers().values()
+print("Capas cargadas en QGIS:")
+for capa in capas:
+    print(f"- {capa.name()}")
