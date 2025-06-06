@@ -1,28 +1,28 @@
 import os
-from qgis.core import QgsProject, QgsField
+from qgis.core import QgsProject, QgsField, QgsFeatureRequest
 from PyQt5.QtCore import QVariant
+from PyQt5.QtWidgets import QInputDialog
 
 # Pedir datos al usuario
-colonia = "OBRERA"
-cuadrilla = "1"
-fecha = "20250605"
+colonia, ok1 = QInputDialog.getText(None, "Nombre de la colonia", "Ingrese el nombre de la colonia:")
+cuadrilla, ok2 = QInputDialog.getText(None, "Número de cuadrilla", "Ingrese el número de la cuadrilla:")
+fecha, ok3 = QInputDialog.getText(None, "Fecha", "Ingrese la fecha (YYYYMMDD):")
 
+if not (ok1 and ok2 and ok3):
+    raise Exception("⚠️ Operación cancelada por el usuario.")
 
-# Parámetros fijos
-ruta_base = r"C:\DGSUS\VINCULOS\DAP\CICS\2024-2025\OBRERA\CUADRILLA_1\2025-06-05"  # Ruta base que contiene carpetas por colonia
+# Ruta base que contiene carpetas por colonia
+ruta_base = r"C:\DGSUS\VINCULOS\DAP\CICS\2024-2025"
 
 # Nombres capas y campos
 capa_principal_nombre = "OBRERA_3"
 capa_attach_nombre = "OBRERA_3__ATTACH"
-
 campo_fk_principal = "fid"
 campo_fk_attach = "REL_OBJECTID"
 campo_blob = "DATA"
 
 # Campos a crear en la capa principal para las fotos
 campos_fotos = ["FOTO1", "FOTO2", "FOTO3"]
-
-# Campos adicionales
 campo_cuadrilla = "CUADRILLA"
 campo_fecha = "FECHA"
 
@@ -35,66 +35,75 @@ capa_principal_list = QgsProject.instance().mapLayersByName(capa_principal_nombr
 capa_attach_list = QgsProject.instance().mapLayersByName(capa_attach_nombre)
 
 if not capa_principal_list or not capa_attach_list:
-    print("❌ No se encontraron las capas. Revisa los nombres.")
-else:
-    capa_principal = capa_principal_list[0]
-    capa_attach = capa_attach_list[0]
+    raise Exception("❌ No se encontraron las capas. Revisa los nombres.")
 
-    # Función para agregar campo si no existe
-    def agregar_campo_si_no_existe(capa, nombre_campo, tipo_campo=QVariant.String):
-        if nombre_campo not in [f.name() for f in capa.fields()]:
-            capa.startEditing()
-            capa.dataProvider().addAttributes([QgsField(nombre_campo, tipo_campo)])
-            capa.updateFields()
-            capa.commitChanges()
+capa_principal = capa_principal_list[0]
+capa_attach = capa_attach_list[0]
 
-    # Añadir campos FOTO1, FOTO2, FOTO3, CUADRILLA, FECHA si no existen
-    for c in campos_fotos + [campo_cuadrilla, campo_fecha]:
-        agregar_campo_si_no_existe(capa_principal, c)
+# Función para agregar campo si no existe
+def agregar_campo_si_no_existe(capa, nombre_campo, tipo_campo=QVariant.String):
+    if nombre_campo not in [f.name() for f in capa.fields()]:
+        capa.startEditing()
+        capa.dataProvider().addAttributes([QgsField(nombre_campo, tipo_campo)])
+        capa.updateFields()
+        capa.commitChanges()
 
-    # Obtener índices para optimizar acceso
-    idx_fk_principal = capa_principal.fields().indexFromName(campo_fk_principal)
-    idx_fk_attach = capa_attach.fields().indexFromName(campo_fk_attach)
-    idx_blob = capa_attach.fields().indexFromName(campo_blob)
+# Añadir campos necesarios
+for c in campos_fotos + [campo_cuadrilla, campo_fecha]:
+    agregar_campo_si_no_existe(capa_principal, c)
 
-    idxs_fotos = [capa_principal.fields().indexFromName(c) for c in campos_fotos]
-    idx_cuadrilla = capa_principal.fields().indexFromName(campo_cuadrilla)
-    idx_fecha = capa_principal.fields().indexFromName(campo_fecha)
+# Obtener índices de campos
+idx_fk_principal = capa_principal.fields().indexFromName(campo_fk_principal)
+idx_fk_attach = capa_attach.fields().indexFromName(campo_fk_attach)
+idx_blob = capa_attach.fields().indexFromName(campo_blob)
 
-    # Agrupar adjuntos por REL_OBJECTID
-    adjuntos_por_fid = {}
-    for feat_attach in capa_attach.getFeatures():
-        rel_id = feat_attach[idx_fk_attach]
-        if rel_id not in adjuntos_por_fid:
-            adjuntos_por_fid[rel_id] = []
-        adjuntos_por_fid[rel_id].append(feat_attach)
+idxs_fotos = [capa_principal.fields().indexFromName(c) for c in campos_fotos]
+idx_cuadrilla = capa_principal.fields().indexFromName(campo_cuadrilla)
+idx_fecha = capa_principal.fields().indexFromName(campo_fecha)
 
-    # Editar capa principal
-    capa_principal.startEditing()
+# Agrupar adjuntos por REL_OBJECTID
+adjuntos_por_fid = {}
+for feat_attach in capa_attach.getFeatures():
+    rel_id = feat_attach[idx_fk_attach]
+    if rel_id not in adjuntos_por_fid:
+        adjuntos_por_fid[rel_id] = []
+    adjuntos_por_fid[rel_id].append(feat_attach)
 
-    for feat_principal in capa_principal.getFeatures():
-        fid = feat_principal.id()
-        adjuntos = adjuntos_por_fid.get(fid, [])
+# Editar capa principal
+capa_principal.startEditing()
 
-        rutas_fotos = []
-        for i, adj in enumerate(adjuntos[:3]):  # máximo 3 fotos
-            blob = adj[idx_blob]
-            if not blob:
-                continue
-            nombre_archivo = f"fid{fid}_foto{i+1}.jpg"
-            ruta_completa = os.path.join(carpeta_imagenes, nombre_archivo)
-            with open(ruta_completa, 'wb') as f:
-                f.write(blob)
-            rutas_fotos.append(ruta_completa)
+for feat_principal in capa_principal.getFeatures():
+    fid = feat_principal.id()
+    adjuntos = adjuntos_por_fid.get(fid, [])
 
-        # Actualizar campos FOTO1, FOTO2, FOTO3
-        for i in range(3):
-            valor = rutas_fotos[i] if i < len(rutas_fotos) else ''
-            capa_principal.changeAttributeValue(fid, idxs_fotos[i], valor)
+    rutas_fotos = []
+    for i, adj in enumerate(adjuntos[:3]):  # máximo 3 fotos
+        blob = adj[idx_blob]
+        if not blob:
+            continue
+        nombre_archivo = f"fid{fid}_foto{i+1}.jpg"
+        ruta_completa = os.path.join(carpeta_imagenes, nombre_archivo)
+        with open(ruta_completa, 'wb') as f:
+            f.write(blob)
+        rutas_fotos.append(ruta_completa)
 
-        # Actualizar campos CUADRILLA y FECHA
-        capa_principal.changeAttributeValue(fid, idx_cuadrilla, cuadrilla)
-        capa_principal.changeAttributeValue(fid, idx_fecha, fecha)
+    # Actualizar campos FOTO1, FOTO2, FOTO3
+    for i in range(3):
+        valor = rutas_fotos[i] if i < len(rutas_fotos) else ''
+        capa_principal.changeAttributeValue(fid, idxs_fotos[i], valor)
 
-    capa_principal.commitChanges()
-    print("✅ Proceso completado. Imágenes guardadas en:", carpeta_imagenes)
+    # Actualizar CUADRILLA y FECHA
+    capa_principal.changeAttributeValue(fid, idx_cuadrilla, cuadrilla)
+    capa_principal.changeAttributeValue(fid, idx_fecha, fecha)
+
+capa_principal.commitChanges()
+
+# Eliminar registros sin ninguna imagen
+capa_principal.startEditing()
+for feat in capa_principal.getFeatures():
+    fotos = [feat[c] for c in campos_fotos]
+    if all(not f for f in fotos):
+        capa_principal.deleteFeature(feat.id())
+capa_principal.commitChanges()
+
+print("✅ Proceso completado. Imágenes guardadas en:", carpeta_imagenes)
