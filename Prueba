@@ -1,0 +1,204 @@
+import os
+import base64
+from datetime import datetime
+from PyQt5.QtWidgets import QInputDialog
+from PyQt5.QtCore import QVariant
+from qgis.core import QgsProject, QgsField, QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY
+import exifread
+import simplekml
+
+# --- Ventanas emergentes para pedir datos ---
+colonia, ok = QInputDialog.getText(None, "Entrada de datos", "Nombre de la colonia:")
+if not ok or not colonia:
+    raise Exception("No se ingresó colonia")
+
+cuadrilla, ok = QInputDialog.getText(None, "Entrada de datos", "Número de cuadrilla:")
+if not ok or not cuadrilla:
+    raise Exception("No se ingresó cuadrilla")
+
+fecha_str, ok = QInputDialog.getText(None, "Entrada de datos", "Fecha del trabajo (YYYY-MM-DD):")
+if not ok or not fecha_str:
+    raise Exception("No se ingresó fecha")
+try:
+    fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+except:
+    raise Exception("Formato de fecha inválido, debe ser YYYY-MM-DD")
+
+# --- Parámetros fijos y rutas ---
+ruta_base = r"C:\Users\xelit\OneDrive\Documentos\DAP"
+carpeta_imagenes = os.path.join(ruta_base, colonia, f"CUADRILLA_{cuadrilla}", fecha_str)
+os.makedirs(carpeta_imagenes, exist_ok=True)
+
+# --- Nombres capas y campos ---
+capa_principal_nombre = "PANTITLAN"
+capa_attach_nombre = "PANTITLAN__ATTACH"
+
+campo_fk_principal = "fid"
+campo_fk_attach = "REL_OBJECTID"
+campo_blob = "DATA"
+
+campos_fotos = ["FOTO_1", "FOTO_2", "FOTO_3"]
+campo_vinculo = "VINCULO"
+campo_cuadrilla = "CUADRILLA"
+campo_fecha = "FECHA"
+campo_enlace = "ENLACE"
+
+# --- Obtener capas ---
+capa_principal_list = QgsProject.instance().mapLayersByName(capa_principal_nombre)
+capa_attach_list = QgsProject.instance().mapLayersByName(capa_attach_nombre)
+
+if not capa_principal_list or not capa_attach_list:
+    raise Exception("No se encontraron las capas. Revisa los nombres.")
+
+capa_principal = capa_principal_list[0]
+capa_attach = capa_attach_list[0]
+
+# --- Función para agregar campo si no existe ---
+def agregar_campo_si_no_existe(capa, nombre_campo, tipo_campo=QVariant.String):
+    if nombre_campo not in [f.name() for f in capa.fields()]:
+        capa.startEditing()
+        capa.dataProvider().addAttributes([QgsField(nombre_campo, tipo_campo)])
+        capa.updateFields()
+        capa.commitChanges()
+
+# --- Agregar campos necesarios ---
+for c in campos_fotos + [campo_vinculo, campo_cuadrilla, campo_fecha, campo_enlace]:
+    agregar_campo_si_no_existe(capa_principal, c)
+
+# --- Obtener índices para acelerar acceso ---
+idx_fk_principal = capa_principal.fields().indexFromName(campo_fk_principal)
+idx_fk_attach = capa_attach.fields().indexFromName(campo_fk_attach)
+idx_blob = capa_attach.fields().indexFromName(campo_blob)
+
+idxs_fotos = [capa_principal.fields().indexFromName(c) for c in campos_fotos]
+idx_vinculo = capa_principal.fields().indexFromName(campo_vinculo)
+idx_cuadrilla = capa_principal.fields().indexFromName(campo_cuadrilla)
+idx_fecha = capa_principal.fields().indexFromName(campo_fecha)
+idx_enlace = capa_principal.fields().indexFromName(campo_enlace)
+
+# --- Función para extraer fecha EXIF de bytes ---
+def obtener_fecha_exif(bytes_img):
+    try:
+        tags = exifread.process_file(io.BytesIO(bytes_img), stop_tag="EXIF DateTimeOriginal", details=False)
+        fecha_exif_str = tags.get("EXIF DateTimeOriginal")
+        if fecha_exif_str:
+            fecha_exif = datetime.strptime(str(fecha_exif_str), "%Y:%m:%d %H:%M:%S").date()
+            return fecha_exif
+    except Exception:
+        pass
+    return None
+
+# --- Agrupar adjuntos por REL_OBJECTID ---
+adjuntos_por_fid = {}
+for feat_attach in capa_attach.getFeatures():
+    rel_id = feat_attach[idx_fk_attach]
+    if rel_id not in adjuntos_por_fid:
+        adjuntos_por_fid[rel_id] = []
+    adjuntos_por_fid[rel_id].append(feat_attach)
+
+# --- Comenzar edición capa principal ---
+capa_principal.startEditing()
+
+# --- Para almacenar qué features eliminar ---
+fids_a_eliminar = []
+
+import io
+
+import io  # si no está importado, recuerda importarlo arriba
+
+for feat_principal in capa_principal.getFeatures():
+    fid = feat_principal.id()
+    adjuntos = adjuntos_por_fid.get(fid, [])
+
+    fotos_validas = []
+    for idx_adj, adj in enumerate(adjuntos):
+        blob = adj[idx_blob]
+        if not blob:
+            print(f"FID {fid} - Adjunto {idx_adj}: sin blob")
+            continue
+        
+        img_bytes = bytes(blob)
+
+        # Leer fecha EXIF, con debug:
+        try:
+            tags = exifread.process_file(io.BytesIO(img_bytes), stop_tag="EXIF DateTimeOriginal", details=False)
+            fecha_exif_str = tags.get("EXIF DateTimeOriginal")
+            if fecha_exif_str:
+                fecha_exif = datetime.strptime(str(fecha_exif_str), "%Y:%m:%d %H:%M:%S").date()
+                print(f"FID {fid} - Adj {idx_adj}: Fecha EXIF {fecha_exif} - Fecha filtro {fecha}")
+            else:
+                fecha_exif = None
+                print(f"FID {fid} - Adj {idx_adj}: No tiene fecha EXIF")
+        except Exception as e:
+            fecha_exif = None
+            print(f"FID {fid} - Adj {idx_adj}: Error leyendo EXIF: {e}")
+
+        # Solo fotos con fecha EXIF igual a fecha filtro
+        if fecha_exif == fecha:
+            fotos_validas.append(img_bytes)
+
+    if not fotos_validas:
+        print(f"FID {fid}: Sin fotos válidas, será eliminado")
+        fids_a_eliminar.append(fid)
+        continue
+
+
+    # Guardar hasta 3 fotos
+    rutas_fotos = []
+    for i, img_bytes in enumerate(fotos_validas[:3]):
+        nombre_archivo = f"fid{fid}_foto{i+1}.jpg"
+        ruta_completa = os.path.join(carpeta_imagenes, nombre_archivo)
+        with open(ruta_completa, "wb") as f:
+            f.write(img_bytes)
+        rutas_fotos.append(ruta_completa)
+
+    # Actualizar campos FOTO_1, FOTO_2, FOTO_3 con rutas o vacío
+    for i in range(3):
+        valor = rutas_fotos[i] if i < len(rutas_fotos) else ""
+        capa_principal.changeAttributeValue(fid, idxs_fotos[i], valor)
+
+    # Campo VINCULO = carpeta con imágenes
+    capa_principal.changeAttributeValue(fid, idx_vinculo, carpeta_imagenes)
+    # CUADRILLA y FECHA
+    capa_principal.changeAttributeValue(fid, idx_cuadrilla, cuadrilla)
+    capa_principal.changeAttributeValue(fid, idx_fecha, fecha_str)
+
+    # Campo ENLACE: html con imágenes embebidas
+    html_imagenes = ""
+    for ruta_img in rutas_fotos:
+        # para mostrar la imagen en popup (asegúrate que la ruta sea accesible)
+        html_imagenes += f'<img src="file:///{ruta_img.replace(os.sep, "/")}" width="200"><br>'
+    capa_principal.changeAttributeValue(fid, idx_enlace, html_imagenes)
+
+# --- Eliminar features sin fotos válidas ---
+if fids_a_eliminar:
+    for fid in fids_a_eliminar:
+        capa_principal.deleteFeature(fid)
+
+# --- Guardar cambios ---
+capa_principal.commitChanges()
+
+print(f"✅ Proceso completado. Imágenes guardadas en: {carpeta_imagenes}")
+
+# --- Generar KMZ con simplekml ---
+
+kml = simplekml.Kml()
+for feat in capa_principal.getFeatures():
+    geom = feat.geometry()
+    if not geom or geom.isEmpty():
+        continue
+    punto = geom.asPoint()
+    if not punto:
+        continue
+
+    # Obtener datos para popup
+    nombre = f"FID: {feat.id()}"
+    enlace_html = feat.attribute(campo_enlace)
+
+    pnt = kml.newpoint(name=nombre, coords=[(punto.x(), punto.y())])
+    pnt.description = enlace_html
+
+ruta_kmz = os.path.join(carpeta_imagenes, f"{colonia}_CUADRILLA_{cuadrilla}_{fecha_str}.kmz")
+kml.save(ruta_kmz)
+
+print(f"✅ KMZ generado en: {ruta_kmz}")
