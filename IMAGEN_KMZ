@@ -1,0 +1,107 @@
+import os
+import zipfile
+import shutil
+from qgis.core import QgsProject, QgsVectorLayer, QgsCoordinateTransform, QgsCoordinateReferenceSystem
+from qgis.PyQt.QtWidgets import QInputDialog, QFileDialog
+from qgis.utils import iface
+
+# --- Pedir datos ---
+colonia, ok1 = QInputDialog.getText(None, 'Colonia', 'Escribe el nombre de la colonia:')
+cuadrilla, ok2 = QInputDialog.getText(None, 'Cuadrilla', 'Escribe el número de cuadrilla:')
+if not (ok1 and ok2):
+    raise Exception("Operación cancelada")
+
+carpeta_salida = QFileDialog.getExistingDirectory(None, 'Selecciona la carpeta de salida')
+if not carpeta_salida:
+    raise Exception("No se seleccionó carpeta")
+
+# --- Obtener capa activa ---
+layer = iface.activeLayer()
+if not layer:
+    raise Exception("No hay capa activa")
+
+# --- Preparar carpeta temporal para kmz ---
+nombre_kmz = f"{colonia.upper()}_{cuadrilla.upper()}"
+ruta_kmz = os.path.join(carpeta_salida, f"{nombre_kmz}.kmz")
+carpeta_temporal = os.path.join(carpeta_salida, f"{nombre_kmz}_kmz")
+carpeta_imagenes = os.path.join(carpeta_temporal, "imagenes")
+
+os.makedirs(carpeta_imagenes, exist_ok=True)
+
+# --- Transformación a WGS84 ---
+crs_src = layer.crs()
+crs_dest = QgsCoordinateReferenceSystem("EPSG:4326")
+transformer = QgsCoordinateTransform(crs_src, crs_dest, QgsProject.instance())
+
+# --- Crear archivo KML ---
+ruta_kml = os.path.join(carpeta_temporal, "doc.kml")
+
+with open(ruta_kml, "w", encoding="utf-8") as kml:
+    kml.write("<?xml version='1.0' encoding='UTF-8'?>\n")
+    kml.write("<kml xmlns='http://www.opengis.net/kml/2.2'>\n")
+    kml.write("<Document>\n")
+    kml.write(f"<name>{nombre_kmz}</name>\n")
+
+    for feat in layer.getFeatures():
+        geom = feat.geometry()
+        if geom is None or geom.isEmpty():
+            continue
+        try:
+            point_geom = geom.asPoint()
+        except:
+            # Por si no es punto simple, intenta centroid
+            point_geom = geom.centroid().asPoint()
+
+        if point_geom is None:
+            continue
+
+        # Transformar coordenadas a WGS84
+        try:
+            wgs84_point = transformer.transform(point_geom)
+        except Exception as e:
+            print(f"Error transformando geometría: {e}")
+            continue
+
+        fotos = []
+        for campo in ['FOTO1', 'FOTO2', 'FOTO3']:
+            ruta = feat[campo]
+            if ruta and os.path.exists(ruta):
+                nombre_archivo = os.path.basename(ruta)
+                destino = os.path.join(carpeta_imagenes, nombre_archivo)
+                # Copiar la imagen sólo si no existe para ahorrar tiempo
+                if not os.path.exists(destino):
+                    shutil.copy(ruta, destino)
+                fotos.append(f"imagenes/{nombre_archivo}")
+
+        if not fotos:
+            continue
+
+        # Crear placemark con fotos
+        kml.write("<Placemark>\n")
+        nombre_placemark = str(feat.id())
+        if 'id' in feat.fields().names():
+            nombre_placemark = str(feat['id'])
+        kml.write(f"<name>{nombre_placemark}</name>\n")
+        kml.write("<description><![CDATA[")
+        for f in fotos:
+            kml.write(f'<img src="{f}" width="300"><br>')
+        kml.write("]]></description>\n")
+        kml.write(f"<Point><coordinates>{wgs84_point.x()},{wgs84_point.y()},0</coordinates></Point>\n")
+        kml.write("</Placemark>\n")
+
+    kml.write("</Document>\n")
+    kml.write("</kml>\n")
+
+# --- Comprimir en KMZ ---
+with zipfile.ZipFile(ruta_kmz, 'w', zipfile.ZIP_DEFLATED) as kmz:
+    kmz.write(ruta_kml, arcname='doc.kml')
+    for root, _, files in os.walk(carpeta_imagenes):
+        for file in files:
+            ruta_completa = os.path.join(root, file)
+            arcname = os.path.relpath(ruta_completa, carpeta_temporal)
+            kmz.write(ruta_completa, arcname=arcname)
+
+# --- Borrar carpeta temporal ---
+shutil.rmtree(carpeta_temporal)
+
+iface.messageBar().pushSuccess("¡Listo!", f"KMZ generado en:\n{ruta_kmz}")
