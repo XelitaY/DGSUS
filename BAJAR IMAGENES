@@ -1,0 +1,36 @@
+from PIL import Image
+import os
+
+# Ruta de la carpeta con las imágenes a reducir
+carpeta = r"C:\DGSUS\VINCULOS\DAP\CICS\2024-2025\PANTITLAN\CUADRILLA_5\20250606"
+
+# Tamaño deseado (puedes ajustar esto)
+nuevo_ancho = 800  # píxeles
+
+# Calidad de salida (1 a 95, mientras más bajo, menor calidad y tamaño)
+calidad = 70
+
+for nombre_archivo in os.listdir(carpeta):
+    if nombre_archivo.lower().endswith(('.jpg', '.jpeg', '.png')):
+        ruta_imagen = os.path.join(carpeta, nombre_archivo)
+
+        try:
+            with Image.open(ruta_imagen) as img:
+                # Redimensionar manteniendo la relación de aspecto
+                ancho_original, alto_original = img.size
+
+                if ancho_original > nuevo_ancho:
+                    factor = nuevo_ancho / float(ancho_original)
+                    nuevo_alto = int(float(alto_original) * factor)
+                    img_redimensionada = img.resize((nuevo_ancho, nuevo_alto), Image.LANCZOS)
+                else:
+                    img_redimensionada = img.copy()  # No redimensionar si ya es pequeña
+
+                # Sobrescribir la imagen con la nueva versión más ligera
+                img_redimensionada.save(ruta_imagen, quality=calidad, optimize=True)
+                print(f"✔ Imagen procesada: {nombre_archivo}")
+
+        except Exception as e:
+            print(f"❌ Error con {nombre_archivo}: {e}")
+
+print("✅ ¡Listo! Las imágenes han sido optimizadas.")
