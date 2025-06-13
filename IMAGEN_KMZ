@@ -1,14 +1,56 @@
 import os
 import zipfile
 import shutil
-from qgis.core import QgsProject, QgsVectorLayer, QgsCoordinateTransform, QgsCoordinateReferenceSystem
-from qgis.PyQt.QtWidgets import QInputDialog, QFileDialog
+from qgis.core import (
+    QgsProject, QgsVectorLayer, QgsCoordinateTransform, QgsCoordinateReferenceSystem
+)
+from qgis.PyQt.QtWidgets import (
+    QInputDialog, QFileDialog, QDialog, QVBoxLayout, QCheckBox, QPushButton, QLabel, QComboBox
+)
 from qgis.utils import iface
+
+# --- Clase para seleccionar campos ---
+class KMZFieldSelector(QDialog):
+    def __init__(self, campos):
+        super().__init__()
+        self.setWindowTitle("Configurar campos para KMZ")
+        self.campos = campos
+        self.checkboxes = []
+        self.selected_description_fields = []
+        self.selected_title_field = None
+
+        layout = QVBoxLayout()
+
+        # Combo para título
+        layout.addWidget(QLabel("Selecciona el campo para el título del marcador:"))
+        self.title_combo = QComboBox()
+        self.title_combo.addItems(campos)
+        layout.addWidget(self.title_combo)
+
+        # Checkboxes para descripción
+        layout.addWidget(QLabel("Selecciona campos para la descripción:"))
+        for campo in campos:
+            cb = QCheckBox(campo)
+            layout.addWidget(cb)
+            self.checkboxes.append(cb)
+
+        # Botón aceptar
+        btn = QPushButton("Aceptar")
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn)
+
+        self.setLayout(layout)
+
+    def get_selections(self):
+        self.selected_description_fields = [cb.text() for cb in self.checkboxes if cb.isChecked()]
+        self.selected_title_field = self.title_combo.currentText()
+        return self.selected_title_field, self.selected_description_fields
 
 # --- Pedir datos ---
 colonia, ok1 = QInputDialog.getText(None, 'Colonia', 'Escribe el nombre de la colonia:')
 cuadrilla, ok2 = QInputDialog.getText(None, 'Cuadrilla', 'Escribe el número de cuadrilla:')
-if not (ok1 and ok2):
+fecha, ok3 = QInputDialog.getText(None, 'Fecha', 'Escribe la fecha (ejemplo: 2024-06-12):')
+if not (ok1 and ok2 and ok3):
     raise Exception("Operación cancelada")
 
 carpeta_salida = QFileDialog.getExistingDirectory(None, 'Selecciona la carpeta de salida')
@@ -20,8 +62,18 @@ layer = iface.activeLayer()
 if not layer:
     raise Exception("No hay capa activa")
 
+# --- Obtener lista de campos para el diálogo ---
+campos = [field.name() for field in layer.fields()]
+
+# --- Mostrar diálogo para seleccionar campos ---
+dialog = KMZFieldSelector(campos)
+if dialog.exec_() != QDialog.Accepted:
+    raise Exception("Operación cancelada por el usuario")
+
+campo_titulo, campos_descripcion = dialog.get_selections()
+
 # --- Preparar carpeta temporal para kmz ---
-nombre_kmz = f"{colonia.upper()}_{cuadrilla.upper()}"
+nombre_kmz = f"{colonia.upper()}_{cuadrilla.upper()}_{fecha.replace('-', '')}"
 ruta_kmz = os.path.join(carpeta_salida, f"{nombre_kmz}.kmz")
 carpeta_temporal = os.path.join(carpeta_salida, f"{nombre_kmz}_kmz")
 carpeta_imagenes = os.path.join(carpeta_temporal, "imagenes")
@@ -49,13 +101,12 @@ with open(ruta_kml, "w", encoding="utf-8") as kml:
         try:
             point_geom = geom.asPoint()
         except:
-            # Por si no es punto simple, intenta centroid
             point_geom = geom.centroid().asPoint()
 
         if point_geom is None:
             continue
 
-        # Transformar coordenadas a WGS84
+        # Transformar a WGS84
         try:
             wgs84_point = transformer.transform(point_geom)
         except Exception as e:
@@ -63,29 +114,35 @@ with open(ruta_kml, "w", encoding="utf-8") as kml:
             continue
 
         fotos = []
-        for campo in ['FOTO1', 'FOTO2', 'FOTO3']:
-            ruta = feat[campo]
-            if ruta and os.path.exists(ruta):
-                nombre_archivo = os.path.basename(ruta)
+        for campo_foto in ['FOTO1', 'FOTO2', 'FOTO3']:
+            ruta_foto = feat[campo_foto]
+            if ruta_foto and os.path.exists(ruta_foto):
+                nombre_archivo = os.path.basename(ruta_foto)
                 destino = os.path.join(carpeta_imagenes, nombre_archivo)
-                # Copiar la imagen sólo si no existe para ahorrar tiempo
                 if not os.path.exists(destino):
-                    shutil.copy(ruta, destino)
+                    shutil.copy(ruta_foto, destino)
                 fotos.append(f"imagenes/{nombre_archivo}")
 
         if not fotos:
             continue
 
-        # Crear placemark con fotos
+        # Título del marcador: valor del campo elegido
+        valor_titulo = feat[campo_titulo] if campo_titulo in feat.fields().names() else str(feat.id())
+
+        # Crear placemark
         kml.write("<Placemark>\n")
-        nombre_placemark = str(feat.id())
-        if 'id' in feat.fields().names():
-            nombre_placemark = str(feat['id'])
-        kml.write(f"<name>{nombre_placemark}</name>\n")
+        kml.write(f"<name>{valor_titulo}</name>\n")
+
+        # Descripción con campos seleccionados + imágenes
         kml.write("<description><![CDATA[")
+        for campo_desc in campos_descripcion:
+            if campo_desc in feat.fields().names():
+                valor = feat[campo_desc]
+                kml.write(f"<b>{campo_desc}:</b> {valor}<br>")
         for f in fotos:
             kml.write(f'<img src="{f}" width="300"><br>')
         kml.write("]]></description>\n")
+
         kml.write(f"<Point><coordinates>{wgs84_point.x()},{wgs84_point.y()},0</coordinates></Point>\n")
         kml.write("</Placemark>\n")
 
@@ -102,6 +159,4 @@ with zipfile.ZipFile(ruta_kmz, 'w', zipfile.ZIP_DEFLATED) as kmz:
             kmz.write(ruta_completa, arcname=arcname)
 
 # --- Borrar carpeta temporal ---
-shutil.rmtree(carpeta_temporal)
-
-iface.messageBar().pushSuccess("¡Listo!", f"KMZ generado en:\n{ruta_kmz}")
+shutil.rmtree(carpeta_temporal
